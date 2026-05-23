@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\sajid\\\\Documents\\\\ia piano 2\" -Recurse -Force)",
+      "Bash(Select-Object FullName, PSIsContainer, Length)",
+      "Bash(Format-Table -AutoSize -Wrap)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(Select-Object -First 15)",
+      "Bash(python3 -c \"import soundfile as sf; info = sf.info\\(r'C:\\\\Users\\\\sajid\\\\Documents\\\\instrument\\\\Ivy Audio - Piano in 162 sfz\\\\Piano in 162 Samples\\\\Close\\\\PedalOffClose\\\\01-PedalOffForte1Close.flac'\\); print\\(f'Sample rate: {info.samplerate}, Channels: {info.channels}, Duration: {info.duration:.3f}s, Format: {info.format}'\\)\")",
+      "Bash(python -c \"import soundfile as sf; info = sf.info\\(r'C:\\\\Users\\\\sajid\\\\Documents\\\\instrument\\\\Ivy Audio - Piano in 162 sfz\\\\Piano in 162 Samples\\\\Close\\\\PedalOffClose\\\\01-PedalOffForte1Close.flac'\\); print\\(f'Sample rate: {info.samplerate}, Channels: {info.channels}, Duration: {info.duration:.3f}s, Format: {info.format}'\\)\")",
+      "Bash(Select-Object -First 20)",
+      "Bash(python3 -c \"import sys; print\\(sys.stdin.read\\(\\).strip\\(\\)\\)\")",
+      "Bash(python3 -c \"import soundfile; info = soundfile.info\\(r'C:\\\\Users\\\\sajid\\\\Documents\\\\instrument\\\\Ivy Audio - Piano in 162 sfz\\\\Piano in 162 Samples\\\\Close\\\\PedalOffClose\\\\01-PedalOffForte1Close.flac'\\); print\\(f'samplerate={info.samplerate}, channels={info.channels}, subtype={info.subtype}, frames={info.frames}'\\)\")",
+      "Bash(python3 *)",
+      "Bash(git init *)",
+      "Bash(python -m pytest tests/test_parser.py -v)",
+      "Bash(python -c \"from piano_neuronal.s1_data.dataset_parser import discover_all_files; files = discover_all_files\\(\\); print\\(f'Total: {len\\(files\\)}'\\); print\\(f'First: {files[0]}'\\); print\\(f'Last: {files[-1]}'\\)\")",
+      "Bash(python -m pytest tests/test_features.py -v)",
+      "Bash(python -m pip install librosa soundfile h5py pretty_midi torchaudio scipy)",
+      "Bash(python -m pytest tests/test_features.py::TestInharmonicity::test_pure_sine_B_is_zero tests/test_features.py::TestDecay::test_biexponential_recovery tests/test_features.py::TestSpectralFeatures -v)",
+      "Bash(python -m pytest tests/test_features.py::TestInharmonicity::test_synthetic_B_recovery -v)",
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest tests/test_features.py::TestInharmonicity -v)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pip install torch torchaudio h5py pandas pyarrow tqdm)",
+      "Bash(git add *)"
+    ]
+  }
+}

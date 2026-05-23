@@ -1,0 +1,42 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.venv/
+env/
+
+data_output/
+*.h5
+*.hdf5
+*.parquet
+*.npz
+
+# Datasets (too large, must be downloaded separately)
+datasets/
+maestro_v3/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.tflite
