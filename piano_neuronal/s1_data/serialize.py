@@ -9,6 +9,9 @@ Split strategy:
 Each manifest row carries its assignment: train / val / test.
 """
 
+import os
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 import numpy as np
 import pandas as pd
 import h5py
@@ -78,35 +81,34 @@ def process_and_serialize():
         split_counts[f["split"]] = split_counts.get(f["split"], 0) + 1
     print(f"Split distribution: {split_counts}")
 
-    # Open HDF5 for writing
-    with h5py.File(FEATURES_H5_PATH, "w") as hf:
-        # Group structure: /note_{midi}/{pedal}_{vel}_{mic}_rr{N}
+    # Open HDF5 for writing (use rdcc_nbytes=0 to avoid Windows file locking issues)
+    with h5py.File(FEATURES_H5_PATH, "w", rdcc_nbytes=0) as hf:
+        # Flat group names to avoid HDF5 deep nesting issues
         manifest_records = []
 
         for i, meta in enumerate(tqdm(all_files, desc="Processing samples")):
             filepath = Path(meta["file_path"])
             group_name = (
-                f"note_{meta['midi_note']:03d}/"
-                f"pedal_{meta['pedal']}/"
-                f"vel_{meta['velocity_layer']}/"
-                f"mic_{meta['mic']}/"
-                f"rr_{meta['round_robin']}"
+                f"note{meta['midi_note']:03d}"
+                f"_pedal{meta['pedal']}"
+                f"_vel{meta['velocity_layer']}"
+                f"_mic{meta['mic']}"
+                f"_rr{meta['round_robin']}"
             )
 
             try:
-                # Load audio
+                # Load audio once in stereo, derive mono from it
                 audio_stereo, load_meta = load_audio(
                     filepath, target_sr=SOURCE_SAMPLE_RATE, mono=False, align_onset=True
                 )
-                audio_mono, _ = load_audio(
-                    filepath, target_sr=SOURCE_SAMPLE_RATE, mono=True, align_onset=True
-                )
+                # Derive mono from stereo (mean of channels)
+                audio_mono = np.mean(audio_stereo, axis=0, keepdims=True)  # (1, N)
 
                 # Extract features (mono for most, close+ambient for IR)
                 features, exc_result, ir_result = extract_all_features(
-                    audio_mono=audio_mono[0] if audio_mono.ndim == 2 else audio_mono,
-                    audio_close_mono=audio_mono[0] if audio_mono.ndim == 2 and meta["mic"] == "Close" else None,
-                    audio_ambient_mono=audio_mono[0] if audio_mono.ndim == 2 and meta["mic"] == "Ambient" else None,
+                    audio_mono=audio_mono[0],
+                    audio_close_mono=audio_mono[0] if meta["mic"] == "Close" else None,
+                    audio_ambient_mono=audio_mono[0] if meta["mic"] == "Ambient" else None,
                     sr=SOURCE_SAMPLE_RATE,
                     midi_note=meta["midi_note"],
                     mic_type=meta["mic"],

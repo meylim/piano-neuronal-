@@ -58,12 +58,13 @@ def render_midi_to_audio(
         midi_path = _scale_midi_velocities(midi_path, velocity_scale)
 
     # Build sfizz_render command
+    # sfizz_render uses --wav (not --output) for the output file
     cmd = [
         str(sfizz_cmd),
         "--samplerate", str(sample_rate),
         "--sfz", str(sfz_path),
         "--midi", str(midi_path),
-        "--output", str(output_path),
+        "--wav", str(output_path),
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

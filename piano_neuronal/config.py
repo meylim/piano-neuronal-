@@ -53,7 +53,7 @@ SPLIT_SEED = 42
 
 # Output
 OUTPUT_DIR = Path("./data_output")
-FEATURES_H5_PATH = OUTPUT_DIR / "features.h5"
+FEATURES_H5_PATH = OUTPUT_DIR / "piano162_s1.h5"
 MIDI_PAIRS_H5_PATH = OUTPUT_DIR / "midi_pairs.h5"
 MANIFEST_PATH = OUTPUT_DIR / "manifest.parquet"
 
