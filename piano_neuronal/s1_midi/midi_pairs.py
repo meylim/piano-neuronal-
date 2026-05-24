@@ -38,7 +38,7 @@ from piano_neuronal.s1_midi.midi_renderer import render_midi_to_audio, get_rende
 VELOCITY_SCALES = [0.7, 1.0, 1.3]
 SEGMENT_DURATION_S = 30
 MIN_SEGMENT_DURATION_S = 10
-N_WORKERS = 25  # Parallel sfizz_render processes
+N_WORKERS = 8  # Each sfizz_render loads ~2-4 GB (full SFZ instrument)
 
 
 def find_maestro_midi_files() -> list[Path]:
