@@ -13,6 +13,7 @@ Split strategy:
 Each manifest row carries its assignment: train / val / test.
 """
 
+import gc
 import os
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 os.environ["OPENBLAS_NUM_THREADS"] = "2"  # Limit BLAS threads per worker
@@ -141,8 +142,10 @@ def process_and_serialize():
     success_count = 0
 
     # Process in batches to control memory
+    # maxtasksperchild forces worker restart every 100 tasks to prevent
+    # memory accumulation from librosa/numpy FFT buffers
     with h5py.File(FEATURES_H5_PATH, "w", rdcc_nbytes=0) as hf:
-        with Pool(N_WORKERS) as pool:
+        with Pool(N_WORKERS, maxtasksperchild=100) as pool:
             for batch_start in range(0, len(all_files), BATCH_SIZE):
                 batch = all_files[batch_start:batch_start + BATCH_SIZE]
                 batch_results = list(tqdm(
@@ -222,6 +225,7 @@ def process_and_serialize():
 
                 # Free batch memory and flush HDF5
                 del batch_results
+                gc.collect()  # Force Python GC to reclaim numpy arrays from workers
                 hf.flush()
 
                 print(f"  Progress: {success_count}/{len(all_files)} files "

@@ -5,15 +5,17 @@ Strategy:
 2. Apply velocity augmentation (0.7x, 1.0x, 1.3x) — scaling MIDI velocities
    BEFORE rendering (not audio gain) to produce natural timbre variation.
 3. Extract 30-second segments from longer pieces for additional pairs.
-4. Target: >=5,000 pairs total.
+4. Target: all available pairs (set target_pairs=0 for unlimited).
 
-Optimizations:
-- Parallel rendering with N_WORKERS sfizz_render processes
-- Sort MIDI files by size (shortest first) for faster early progress
-- Clean up WAV files after processing
-- Stop as soon as target_pairs is reached
+Memory-safe design:
+- Renders in batches of BATCH_SIZE and writes to HDF5 immediately,
+  then deletes WAVs before the next batch. This prevents all 3800+ WAVs
+  from existing on disk simultaneously (~270 GB).
+- maxtasksperchild forces sfizz worker restarts to prevent memory leaks.
+- explicit del + gc.collect() after each batch.
 """
 
+import gc
 import os
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
@@ -22,7 +24,7 @@ import h5py
 import pretty_midi
 import soundfile as sf
 from pathlib import Path
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 from tqdm import tqdm
 
 from piano_neuronal.config import (
@@ -39,6 +41,7 @@ VELOCITY_SCALES = [0.7, 1.0, 1.3]
 SEGMENT_DURATION_S = 30
 MIN_SEGMENT_DURATION_S = 10
 N_WORKERS = 8  # Each sfizz_render loads ~2-4 GB (full SFZ instrument)
+BATCH_SIZE = 50  # Render batches — controls peak disk usage
 
 
 def find_maestro_midi_files() -> list[Path]:
@@ -75,8 +78,95 @@ def _render_one(args: tuple) -> dict:
         return {"success": False, "midi_path": midi_path, "vel_scale": vel_scale, "error": str(e)}
 
 
+def _process_render_result(result: dict, hf: h5py.File, pair_count: int,
+                           target_pairs: int) -> tuple[int, list]:
+    """Load a rendered WAV, write pairs to HDF5, return updated pair_count and errors."""
+    errors = []
+    midi_path = result["midi_path"]
+    vel_scale = result["vel_scale"]
+    wav_path = result["wav_path"]
+
+    try:
+        # Load rendered audio
+        audio, sr = sf.read(str(wav_path), dtype="float32")
+
+        # Load original MIDI for events
+        pm = pretty_midi.PrettyMIDI(str(midi_path))
+        midi_events = _serialize_midi_events(pm)
+        del pm  # Free PrettyMIDI memory
+        gc.collect()
+
+        duration_s = audio.shape[0] / sr if audio.ndim == 1 else audio.shape[0] / sr
+
+        if duration_s > SEGMENT_DURATION_S * 1.5:
+            # Extract 30-second segments
+            n_segments = max(1, int(duration_s / SEGMENT_DURATION_S))
+            for seg_idx in range(n_segments):
+                if target_pairs > 0 and pair_count >= target_pairs:
+                    break
+                start_sample = int(seg_idx * SEGMENT_DURATION_S * sr)
+                end_sample = min(start_sample + int(SEGMENT_DURATION_S * sr), audio.shape[0])
+
+                if audio.ndim == 1:
+                    segment = audio[start_sample:end_sample]
+                else:
+                    segment = audio[start_sample:end_sample, :]
+
+                if len(segment) < MIN_SEGMENT_DURATION_S * sr:
+                    continue
+
+                pair_name = f"pair_{pair_count:05d}"
+                grp = hf.create_group(pair_name)
+                if segment.ndim == 1:
+                    grp.create_dataset("audio", data=segment[np.newaxis, :], compression="lzf")
+                else:
+                    grp.create_dataset("audio", data=segment.T, compression="lzf")
+                grp.create_dataset("midi_events", data=midi_events)
+                grp.attrs["source_file"] = midi_path.stem
+                grp.attrs["velocity_scale"] = vel_scale
+                grp.attrs["segment_idx"] = seg_idx
+                grp.attrs["segment_start_s"] = start_sample / sr
+                grp.attrs["duration_s"] = len(segment) / sr
+
+                pair_count += 1
+        else:
+            # Use entire piece
+            pair_name = f"pair_{pair_count:05d}"
+            grp = hf.create_group(pair_name)
+            if audio.ndim == 1:
+                grp.create_dataset("audio", data=audio[np.newaxis, :], compression="lzf")
+            else:
+                grp.create_dataset("audio", data=audio.T, compression="lzf")
+            grp.create_dataset("midi_events", data=midi_events)
+            grp.attrs["source_file"] = midi_path.stem
+            grp.attrs["velocity_scale"] = vel_scale
+            grp.attrs["segment_idx"] = 0
+            grp.attrs["segment_start_s"] = 0.0
+            grp.attrs["duration_s"] = duration_s
+
+            pair_count += 1
+
+        # Free audio memory immediately
+        del audio
+        gc.collect()
+
+    except Exception as e:
+        errors.append((midi_path.name, vel_scale, str(e)))
+
+    # Delete WAV after processing (saves disk space)
+    if wav_path.exists():
+        wav_path.unlink()
+
+    return pair_count, errors
+
+
 def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
-    """Create the (MIDI, audio) pair dataset with parallel rendering."""
+    """Create the (MIDI, audio) pair dataset with batched rendering.
+
+    Renders in batches of BATCH_SIZE to control peak disk usage:
+    instead of rendering all 3800+ WAVs first (would need ~270 GB),
+    we render a batch, write to HDF5, delete WAVs, then proceed.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     midi_files = find_maestro_midi_files()
@@ -90,38 +180,18 @@ def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
     render_dir = OUTPUT_DIR / "rendered_audio"
     render_dir.mkdir(exist_ok=True)
 
-    # Build work items: (midi_path, vel_scale, render_dir)
-    # Render all MIDI files at all 3 velocity scales for full augmentation
+    # Build all work items: (midi_path, vel_scale, render_dir)
     work_items = []
     for midi_path in midi_files:
         for vel_scale in VELOCITY_SCALES:
             work_items.append((midi_path, vel_scale, str(render_dir)))
 
-    print(f"Render jobs: {len(work_items)} ({len(midi_files)} files x {len(VELOCITY_SCALES)} velocities)")
-    print(f"Rendering with {N_WORKERS} workers...")
-
-    # Phase 1: Render all MIDI files in parallel
-    render_results = []
-    with Pool(N_WORKERS) as pool:
-        with tqdm(total=len(work_items), desc="Rendering MIDI") as pbar:
-            for result in pool.imap_unordered(_render_one, work_items, chunksize=1):
-                render_results.append(result)
-                pbar.update(1)
-
-    successful_renders = [r for r in render_results if r["success"]]
-    failed_renders = [r for r in render_results if not r["success"]]
-    print(f"\nRendered: {len(successful_renders)}, Failed: {len(failed_renders)}")
-
-    if failed_renders:
-        print("Sample errors:")
-        for r in failed_renders[:5]:
-            print(f"  {r['midi_path'].name} vel={r['vel_scale']}: {r['error']}")
-
-    # Phase 2: Load rendered audio and write to HDF5
-    print(f"\nPhase 2: Creating pairs from {len(successful_renders)} rendered files...")
+    total_jobs = len(work_items)
+    print(f"Render jobs: {total_jobs} ({len(midi_files)} files x {len(VELOCITY_SCALES)} velocities)")
+    print(f"Processing in batches of {BATCH_SIZE} with {N_WORKERS} workers")
 
     pair_count = 0
-    errors = []
+    total_errors = []
 
     with h5py.File(MIDI_PAIRS_H5_PATH, "w") as hf:
         hf.attrs["renderer"] = renderer_info["renderer"]
@@ -130,94 +200,67 @@ def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
         hf.attrs["velocity_scales"] = VELOCITY_SCALES
         hf.attrs["target_pairs"] = target_pairs
 
-        for result in tqdm(successful_renders, desc="Writing pairs"):
-            if target_pairs > 0 and pair_count >= target_pairs:
-                break
+        # Process in batches to limit peak disk usage
+        with Pool(N_WORKERS, maxtasksperchild=20) as pool:
+            for batch_start in range(0, total_jobs, BATCH_SIZE):
+                batch = work_items[batch_start:batch_start + BATCH_SIZE]
+                batch_num = batch_start // BATCH_SIZE + 1
+                total_batches = (total_jobs + BATCH_SIZE - 1) // BATCH_SIZE
 
-            midi_path = result["midi_path"]
-            vel_scale = result["vel_scale"]
-            wav_path = result["wav_path"]
+                # Render batch
+                batch_results = list(tqdm(
+                    pool.imap_unordered(_render_one, batch),
+                    total=len(batch),
+                    desc=f"Rendering batch {batch_num}/{total_batches}",
+                    leave=False,
+                ))
 
-            try:
-                # Load rendered audio
-                audio, sr = sf.read(str(wav_path), dtype="float32")
+                # Write batch results to HDF5 and delete WAVs
+                for result in batch_results:
+                    if not result["success"]:
+                        total_errors.append((result.get("midi_path", Path("?")).name,
+                                             result["vel_scale"], result["error"]))
+                        # Try to clean up failed WAV if it exists
+                        if result.get("wav_path") and Path(result["wav_path"]).exists():
+                            Path(result["wav_path"]).unlink()
+                        continue
 
-                # Load original MIDI for events
-                pm = pretty_midi.PrettyMIDI(str(midi_path))
-                midi_events = _serialize_midi_events(pm)
+                    if target_pairs > 0 and pair_count >= target_pairs:
+                        # Clean up remaining WAVs for this result
+                        wav_path = result["wav_path"]
+                        if wav_path.exists():
+                            wav_path.unlink()
+                        continue
 
-                duration_s = audio.shape[0] / sr if audio.ndim == 1 else audio.shape[0] / sr
+                    pair_count, errors = _process_render_result(result, hf, pair_count, target_pairs)
+                    total_errors.extend(errors)
 
-                if duration_s > SEGMENT_DURATION_S * 1.5:
-                    # Extract 30-second segments
-                    n_segments = max(1, int(duration_s / SEGMENT_DURATION_S))
-                    for seg_idx in range(n_segments):
-                        if target_pairs > 0 and pair_count >= target_pairs:
-                            break
-                        start_sample = int(seg_idx * SEGMENT_DURATION_S * sr)
-                        end_sample = min(start_sample + int(SEGMENT_DURATION_S * sr), audio.shape[0])
+                # Flush HDF5 and free memory
+                hf.flush()
+                del batch_results
+                gc.collect()
 
-                        if audio.ndim == 1:
-                            segment = audio[start_sample:end_sample]
-                        else:
-                            segment = audio[start_sample:end_sample, :]
+                print(f"  Progress: {pair_count} pairs written, "
+                      f"{batch_start + len(batch)}/{total_jobs} renders done, "
+                      f"{len(total_errors)} errors")
 
-                        if len(segment) < MIN_SEGMENT_DURATION_S * sr:
-                            continue
-
-                        pair_name = f"pair_{pair_count:05d}"
-                        grp = hf.create_group(pair_name)
-                        if segment.ndim == 1:
-                            grp.create_dataset("audio", data=segment[np.newaxis, :], compression="lzf")
-                        else:
-                            grp.create_dataset("audio", data=segment.T, compression="lzf")
-                        grp.create_dataset("midi_events", data=midi_events)
-                        grp.attrs["source_file"] = midi_path.stem
-                        grp.attrs["velocity_scale"] = vel_scale
-                        grp.attrs["segment_idx"] = seg_idx
-                        grp.attrs["segment_start_s"] = start_sample / sr
-                        grp.attrs["duration_s"] = len(segment) / sr
-
-                        pair_count += 1
-                else:
-                    # Use entire piece
-                    pair_name = f"pair_{pair_count:05d}"
-                    grp = hf.create_group(pair_name)
-                    if audio.ndim == 1:
-                        grp.create_dataset("audio", data=audio[np.newaxis, :], compression="lzf")
-                    else:
-                        grp.create_dataset("audio", data=audio.T, compression="lzf")
-                    grp.create_dataset("midi_events", data=midi_events)
-                    grp.attrs["source_file"] = midi_path.stem
-                    grp.attrs["velocity_scale"] = vel_scale
-                    grp.attrs["segment_idx"] = 0
-                    grp.attrs["segment_start_s"] = 0.0
-                    grp.attrs["duration_s"] = duration_s
-
-                    pair_count += 1
-
-                # Clean up WAV after processing
-                if wav_path.exists():
-                    wav_path.unlink()
-
-            except Exception as e:
-                errors.append((midi_path.name, vel_scale, str(e)))
-                continue
-
-        # Flush before closing
-        hf.flush()
-
-    print(f"\nCreated {pair_count} MIDI-audio pairs -> {MIDI_PAIRS_H5_PATH}")
-    if errors:
-        print(f"{len(errors)} errors during pair creation:")
-        for fname, vel, err in errors[:5]:
-            print(f"  {fname} (vel={vel}): {err}")
+                if target_pairs > 0 and pair_count >= target_pairs:
+                    print(f"  Target of {target_pairs} pairs reached, stopping.")
+                    break
 
     # Clean up render directory if empty
     try:
         render_dir.rmdir()
     except OSError:
         pass
+
+    print(f"\nCreated {pair_count} MIDI-audio pairs -> {MIDI_PAIRS_H5_PATH}")
+    if total_errors:
+        print(f"{len(total_errors)} errors:")
+        for fname, vel, err in total_errors[:10]:
+            print(f"  {fname} (vel={vel}): {err}")
+        if len(total_errors) > 10:
+            print(f"  ... and {len(total_errors) - 10} more")
 
 
 def _serialize_midi_events(pm: pretty_midi.PrettyMIDI) -> np.ndarray:
