@@ -166,6 +166,9 @@ def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
     Renders in batches of BATCH_SIZE to control peak disk usage:
     instead of rendering all 3800+ WAVs first (would need ~270 GB),
     we render a batch, write to HDF5, delete WAVs, then proceed.
+
+    Supports resume: if MIDI_PAIRS_H5_PATH exists, counts existing pairs
+    and skips already-rendered MIDI files.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -180,20 +183,38 @@ def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
     render_dir = OUTPUT_DIR / "rendered_audio"
     render_dir.mkdir(exist_ok=True)
 
-    # Build all work items: (midi_path, vel_scale, render_dir)
+    # Resume: check existing pairs
+    existing_pairs = 0
+    already_rendered = set()  # Track (midi_stem, vel_scale) already processed
+    if MIDI_PAIRS_H5_PATH.exists():
+        with h5py.File(MIDI_PAIRS_H5_PATH, "r") as hf:
+            existing_pairs = sum(1 for k in hf.keys() if k.startswith("pair_"))
+            for k in hf.keys():
+                if k.startswith("pair_"):
+                    stem = hf[k].attrs.get("source_file", "")
+                    vel = hf[k].attrs.get("velocity_scale", 1.0)
+                    already_rendered.add((stem, vel))
+        print(f"Resuming: {existing_pairs} pairs already exist, {len(already_rendered)} unique renders done")
+
+    # Build work items: (midi_path, vel_scale, render_dir), skip already done
     work_items = []
+    skipped = 0
     for midi_path in midi_files:
         for vel_scale in VELOCITY_SCALES:
+            if (midi_path.stem, vel_scale) in already_rendered:
+                skipped += 1
+                continue
             work_items.append((midi_path, vel_scale, str(render_dir)))
 
     total_jobs = len(work_items)
-    print(f"Render jobs: {total_jobs} ({len(midi_files)} files x {len(VELOCITY_SCALES)} velocities)")
+    print(f"Render jobs: {total_jobs} ({len(midi_files)} files x {len(VELOCITY_SCALES)} velocities, {skipped} skipped)")
     print(f"Processing in batches of {BATCH_SIZE} with {N_WORKERS} workers")
 
-    pair_count = 0
+    pair_count = existing_pairs
     total_errors = []
 
-    with h5py.File(MIDI_PAIRS_H5_PATH, "w") as hf:
+    h5_mode = "a" if existing_pairs > 0 else "w"
+    with h5py.File(MIDI_PAIRS_H5_PATH, h5_mode) as hf:
         hf.attrs["renderer"] = renderer_info["renderer"]
         hf.attrs["renderer_version"] = renderer_info["version"]
         hf.attrs["sample_rate"] = renderer_info["sample_rate"]

@@ -46,6 +46,17 @@ BATCH_SIZE = 50  # Files per batch — controls memory usage
 N_WORKERS = 10
 
 
+def _make_group_name(meta: dict) -> str:
+    """Build HDF5 group name from file metadata (for resume filtering)."""
+    return (
+        f"note{meta['midi_note']:03d}"
+        f"_pedal{meta['pedal']}"
+        f"_vel{meta['velocity_layer']}"
+        f"_mic{meta['mic']}"
+        f"_rr{meta['round_robin']}"
+    )
+
+
 def assign_split(midi_note: int, velocity_layer: str, rng: np.random.Generator) -> str:
     if velocity_layer == SPLIT_VELOCITY_TEST:
         return "test"
@@ -118,7 +129,11 @@ def _extract_one(meta: dict) -> dict:
 
 
 def process_and_serialize():
-    """Main pipeline: extract features in parallel batches, write to HDF5 incrementally."""
+    """Main pipeline: extract features in parallel batches, write to HDF5 incrementally.
+
+    Supports resuming: if FEATURES_H5_PATH already exists, skips groups that
+    are already present and appends new ones.
+    """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Discovering Piano in 162 files...")
@@ -131,27 +146,46 @@ def process_and_serialize():
     for f in all_files:
         f["split"] = assign_split(f["midi_note"], f["velocity_layer"], rng)
 
+    # Resume: check which groups already exist
+    existing_groups = set()
+    resume_mode = FEATURES_H5_PATH.exists()
+    if resume_mode:
+        with h5py.File(FEATURES_H5_PATH, "r") as hf:
+            existing_groups = set(hf.keys())
+        print(f"Resuming: {len(existing_groups)} groups already in HDF5, skipping them")
+
     split_counts = {}
     for f in all_files:
         split_counts[f["split"]] = split_counts.get(f["split"], 0) + 1
     print(f"Split distribution: {split_counts}")
     print(f"Processing with {N_WORKERS} workers, batch size {BATCH_SIZE}")
 
+    # Filter out already-processed files
+    if existing_groups:
+        before = len(all_files)
+        all_files = [f for f in all_files if f"group_name_for_resume" not in f or True]
+        # We'll filter during processing based on group_name
+        print(f"  {before - len([f for f in all_files if _make_group_name(f) in existing_groups])} files already processed, {len(all_files) - len([f for f in all_files if _make_group_name(f) in existing_groups])} remaining")
+        todo_files = [f for f in all_files if _make_group_name(f) not in existing_groups]
+    else:
+        todo_files = all_files
+
     manifest_records = []
     errors = []
-    success_count = 0
+    success_count = len(existing_groups)
 
     # Process in batches to control memory
     # maxtasksperchild forces worker restart every 100 tasks to prevent
     # memory accumulation from librosa/numpy FFT buffers
-    with h5py.File(FEATURES_H5_PATH, "w", rdcc_nbytes=0) as hf:
+    h5_mode = "a" if resume_mode else "w"
+    with h5py.File(FEATURES_H5_PATH, h5_mode, rdcc_nbytes=0) as hf:
         with Pool(N_WORKERS, maxtasksperchild=100) as pool:
-            for batch_start in range(0, len(all_files), BATCH_SIZE):
-                batch = all_files[batch_start:batch_start + BATCH_SIZE]
+            for batch_start in range(0, len(todo_files), BATCH_SIZE):
+                batch = todo_files[batch_start:batch_start + BATCH_SIZE]
                 batch_results = list(tqdm(
                     pool.imap_unordered(_extract_one, batch),
                     total=len(batch),
-                    desc=f"Batch {batch_start // BATCH_SIZE + 1}/{(len(all_files) + BATCH_SIZE - 1) // BATCH_SIZE}",
+                    desc=f"Batch {batch_start // BATCH_SIZE + 1}/{(len(todo_files) + BATCH_SIZE - 1) // BATCH_SIZE}",
                     leave=False,
                 ))
 
@@ -230,6 +264,7 @@ def process_and_serialize():
 
                 print(f"  Progress: {success_count}/{len(all_files)} files "
                       f"({success_count/len(all_files)*100:.1f}%), "
+                      f"{len(todo_files) - (batch_start + len(batch))} remaining, "
                       f"{len(errors)} errors")
 
     # Write manifest
