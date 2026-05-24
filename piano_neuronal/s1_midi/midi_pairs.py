@@ -37,7 +37,7 @@ from piano_neuronal.config import (
 from piano_neuronal.s1_midi.midi_renderer import render_midi_to_audio, get_renderer_info
 
 
-VELOCITY_SCALES = [0.7, 1.0, 1.3]
+VELOCITY_SCALES = [1.0]  # No augmentation — velocity scaling creates false signal (clipping at 127, compression at 0.7). The Neural Hammer (Strate 1) handles continuous velocity.
 SEGMENT_DURATION_S = 30
 MIN_SEGMENT_DURATION_S = 10
 N_WORKERS = 8  # Each sfizz_render loads ~2-4 GB (full SFZ instrument)
