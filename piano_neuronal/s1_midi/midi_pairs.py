@@ -44,6 +44,31 @@ N_WORKERS = 8  # Each sfizz_render loads ~2-4 GB (full SFZ instrument)
 BATCH_SIZE = 50  # Render batches — controls peak disk usage
 
 
+def _load_maestro_splits() -> dict[str, str]:
+    """Load official MAESTRO v3 train/val/test splits from the CSV.
+
+    Uses the canonical split from maestro-v3.0.0.csv to prevent data leakage:
+    all segments and velocity augmentations of the same piece go into
+    the same split. This is the standard split every reviewer expects.
+    """
+    import pandas as pd
+    csv_path = MAESTRO_V3_DIR / "maestro-v3.0.0" / "maestro-v3.0.0.csv"
+    if not csv_path.exists():
+        csv_path = MAESTRO_V3_DIR / "maestro-v3.0.0.csv"
+    if not csv_path.exists():
+        # Fallback: try top-level
+        csv_path = MAESTRO_V3_DIR / "maestro-v3.0.0.csv"
+
+    df = pd.read_csv(csv_path)
+    # Map midi_filename (without path) -> split
+    splits = {}
+    for _, row in df.iterrows():
+        # Use stem (filename without extension) as key
+        stem = Path(row["midi_filename"]).stem
+        splits[stem] = row["split"]  # "train", "test", or "validation"
+    return splits
+
+
 def find_maestro_midi_files() -> list[Path]:
     """Find all MAESTRO v3 MIDI files, sorted by size (shortest first)."""
     midi_dir = MAESTRO_V3_DIR / "maestro-v3.0.0"
@@ -79,7 +104,7 @@ def _render_one(args: tuple) -> dict:
 
 
 def _process_render_result(result: dict, hf: h5py.File, pair_count: int,
-                           target_pairs: int) -> tuple[int, list]:
+                           target_pairs: int, split: str = "train") -> tuple[int, list]:
     """Load a rendered WAV, write pairs to HDF5, return updated pair_count and errors."""
     errors = []
     midi_path = result["midi_path"]
@@ -127,6 +152,7 @@ def _process_render_result(result: dict, hf: h5py.File, pair_count: int,
                 grp.attrs["segment_idx"] = seg_idx
                 grp.attrs["segment_start_s"] = start_sample / sr
                 grp.attrs["duration_s"] = len(segment) / sr
+                grp.attrs["split"] = split
 
                 pair_count += 1
         else:
@@ -143,6 +169,7 @@ def _process_render_result(result: dict, hf: h5py.File, pair_count: int,
             grp.attrs["segment_idx"] = 0
             grp.attrs["segment_start_s"] = 0.0
             grp.attrs["duration_s"] = duration_s
+            grp.attrs["split"] = split
 
             pair_count += 1
 
@@ -179,6 +206,11 @@ def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
 
     renderer_info = get_renderer_info()
     print(f"Renderer: {renderer_info['renderer']} v{renderer_info['version']}")
+
+    # Load official MAESTRO splits (train/validation/test by piece)
+    maestro_splits = _load_maestro_splits()
+    n_covered = sum(1 for f in midi_files if f.stem in maestro_splits)
+    print(f"MAESTRO splits: {n_covered}/{len(midi_files)} files have official split assignments")
 
     render_dir = OUTPUT_DIR / "rendered_audio"
     render_dir.mkdir(exist_ok=True)
@@ -253,7 +285,16 @@ def create_midi_pairs_dataset(target_pairs: int = 0) -> None:
                             wav_path.unlink()
                         continue
 
-                    pair_count, errors = _process_render_result(result, hf, pair_count, target_pairs)
+                    # Assign split from MAESTRO official split (by piece)
+                    midi_stem = result["midi_path"].stem
+                    split = maestro_splits.get(midi_stem, "train")
+                    # Normalize "validation" -> "val"
+                    if split == "validation":
+                        split = "val"
+
+                    pair_count, errors = _process_render_result(
+                        result, hf, pair_count, target_pairs, split=split
+                    )
                     total_errors.extend(errors)
 
                 # Flush HDF5 and free memory

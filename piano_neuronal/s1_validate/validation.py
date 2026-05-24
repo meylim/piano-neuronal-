@@ -132,6 +132,14 @@ def check_midi_pairs() -> bool:
         pair_count = sum(1 for k in hf.keys() if k.startswith("pair_"))
         print(f"  Pairs found: {pair_count}")
 
+        # Check split distribution (MAESTRO official split)
+        splits = {"train": 0, "val": 0, "test": 0, "unknown": 0}
+        for k in hf.keys():
+            if k.startswith("pair_"):
+                s = hf[k].attrs.get("split", "unknown")
+                splits[s] = splits.get(s, 0) + 1
+        print(f"  Split distribution: {splits}")
+
     ok = pair_count >= 5000
     print(f"  {'PASS' if ok else 'FAIL'} (target: ~49,000, minimum: 5,000)")
     return ok
