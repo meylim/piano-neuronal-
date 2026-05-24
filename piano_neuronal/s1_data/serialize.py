@@ -43,7 +43,7 @@ from piano_neuronal.s1_features.room_ir import extract_room_ir
 from piano_neuronal.s1_features.inharmonicity import interpolate_B_fallback
 
 BATCH_SIZE = 50  # Files per batch — controls memory usage
-N_WORKERS = 25
+N_WORKERS = 10
 
 
 def assign_split(midi_note: int, velocity_layer: str, rng: np.random.Generator) -> str:
