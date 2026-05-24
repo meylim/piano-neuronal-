@@ -5,6 +5,41 @@ from scipy.signal import find_peaks
 from piano_neuronal.config import get_n_fft_for_note, MIDI_NOTE_MIN, MIDI_NOTE_MAX
 
 
+def interpolate_B_fallback(results: list[dict]) -> list[dict]:
+    """Interpolate B for notes where extraction failed (B=0, r_squared=0).
+
+    Groups by (velocity_layer, pedal, mic), sorts by midi_note,
+    and fills B=0 entries via linear interpolation from neighbours.
+    Notes at the edges inherit their nearest valid neighbour.
+    """
+    from itertools import groupby
+
+    key_fn = lambda r: (r.get("velocity_layer", ""), r.get("pedal", ""), r.get("mic", ""))
+
+    sorted_results = sorted(results, key=lambda r: (key_fn(r), r.get("midi_note", 0)))
+
+    for key, group in groupby(sorted_results, key=key_fn):
+        group_list = list(group)
+        notes = np.array([r.get("midi_note", 0) for r in group_list])
+        Bs = np.array([r.get("B", 0.0) for r in group_list])
+        r2s = np.array([r.get("B_fit_r_squared", 0.0) for r in group_list])
+
+        valid = (Bs > 0) & (r2s > 0.1)
+        if valid.sum() < 2:
+            continue
+
+        invalid = ~valid
+        if invalid.sum() == 0:
+            continue
+
+        Bs_interp = np.interp(notes, notes[valid], Bs[valid])
+        for i in np.where(invalid)[0]:
+            group_list[i]["B"] = float(Bs_interp[i])
+            group_list[i]["B_fit_r_squared"] = -1.0  # Mark as interpolated
+
+    return sorted_results
+
+
 def inharmonicity_model(n: float, f0: float, B: float) -> float:
     """Physical model of string inharmonicity.
     f_n = n * f0 * sqrt(1 + B * n^2)
@@ -46,8 +81,13 @@ def extract_inharmonicity_B(
     S = np.abs(np.fft.rfft(audio_segment * np.hanning(len(audio_segment))))
     freqs = np.fft.rfftfreq(len(audio_segment), 1.0 / sr)
 
-    # Find peaks in spectrum
-    min_height = np.max(S) * 0.01
+    # Find peaks in spectrum — use lower threshold for high notes
+    # High piano notes (MIDI>72) have few quiet partials; the default
+    # 1% threshold misses them, yielding B=0 for 25% of the dataset.
+    if midi_note > 72:
+        min_height = np.max(S) * 0.001
+    else:
+        min_height = np.max(S) * 0.01
     min_distance = max(1, int(f0_target * 0.5 / (sr / len(audio_segment))))
     peaks, properties = find_peaks(S, height=min_height, distance=min_distance)
     peak_freqs = freqs[peaks]

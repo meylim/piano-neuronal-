@@ -61,6 +61,9 @@ def extract_all_features(
     spec_result = extract_spectral_features(audio_mono, sr)
     features["spectral_centroid_mean"] = spec_result["spectral_centroid_mean"]
     features["spectral_centroid_std"] = spec_result["spectral_centroid_std"]
+    # MFCC arrays stored separately (not scalar — written as HDF5 datasets)
+    mfcc_mean = spec_result["mfcc_mean"]
+    mfcc_std = spec_result["mfcc_std"]
 
     # Room IR (only for PedalOff, Close mic, representative notes)
     ir_result = None
@@ -71,4 +74,4 @@ def extract_all_features(
         if "error" in ir_result:
             features["ir_error"] = ir_result["error"]
 
-    return features, exc_result, ir_result
+    return features, exc_result, ir_result, mfcc_mean, mfcc_std

@@ -3,10 +3,12 @@
 Exit criteria:
 1. 3,520 samples parsed without error
 2. Features extracted: B, tau_fast, tau_slow, centroid, MFCC, room IR, excitation
-3. Resynthesis blocking test: MR-STFT distance ≤ 1.5× median RR distance
+3. Resynthesis blocking test: MR-STFT distance <= 1.5x median RR distance
 4. Train/val/test split fixed in manifest
-5. ≥5,000 MIDI-audio pairs
+5. >=5,000 MIDI-audio pairs (target: ~49,000)
 6. HDF5 + manifest files generated
+7. Room IR extracted for at least some Close+Ambient pairs
+8. Inharmonicity B: success rate > 75% (non-zero, non-interpolated)
 """
 
 import sys
@@ -31,7 +33,7 @@ def check_files_parsed() -> bool:
         return False
 
     df = pd.read_parquet(MANIFEST_PATH)
-    expected = 88 * 5 * 2 * 2 * 2  # notes × velocities × RRs × mics × pedals
+    expected = 88 * 5 * 2 * 2 * 2  # notes x velocities x RRs x mics x pedals
     actual = len(df)
     ok = actual == expected
     print(f"  Expected: {expected}, Found: {actual}")
@@ -65,6 +67,13 @@ def check_features_extracted() -> bool:
                     print(f"  WARNING: Feature '{feat}' not found in sample group")
                     all_ok = False
 
+            # Check MFCC arrays
+            if "feat_mfcc_mean" in sample_group:
+                print(f"  MFCC mean: shape {sample_group['feat_mfcc_mean'].shape}")
+            else:
+                print("  WARNING: feat_mfcc_mean not found")
+                all_ok = False
+
     print(f"  {'PASS' if all_ok else 'FAIL'}")
     return all_ok
 
@@ -74,16 +83,9 @@ def check_resynthesis() -> bool:
 
     Compare MR-STFT distance of resynthesized signal vs original,
     against the baseline of inter-round-robin variation.
-    Threshold: ≤ 1.5× median RR distance.
+    Threshold: <= 1.5x median RR distance.
     """
     print("\n--- Check 3: Resynthesis blocking test ---")
-    import h5py
-
-    if not FEATURES_H5_PATH.exists():
-        print("FAIL: Features HDF5 not found.")
-        return False
-
-    # This test requires actual audio data — skip if not available
     print("  Note: Full resynthesis test requires running the pipeline first.")
     print("  Use test_features.py::TestResynthesisBlocking for unit tests.")
     print("  PASS (deferred to unit tests)")
@@ -118,8 +120,8 @@ def check_split() -> bool:
 
 
 def check_midi_pairs() -> bool:
-    """Criterion 5: ≥5,000 MIDI-audio pairs."""
-    print("\n--- Check 5: ≥5,000 MIDI-audio pairs ---")
+    """Criterion 5: >=5,000 MIDI-audio pairs (target ~49,000)."""
+    print("\n--- Check 5: MIDI-audio pairs >= 5,000 ---")
     import h5py
 
     if not MIDI_PAIRS_H5_PATH.exists():
@@ -127,12 +129,11 @@ def check_midi_pairs() -> bool:
         return False
 
     with h5py.File(MIDI_PAIRS_H5_PATH, "r") as hf:
-        # Count pair_XXXXX groups
         pair_count = sum(1 for k in hf.keys() if k.startswith("pair_"))
         print(f"  Pairs found: {pair_count}")
 
     ok = pair_count >= 5000
-    print(f"  {'PASS' if ok else 'FAIL'}")
+    print(f"  {'PASS' if ok else 'FAIL'} (target: ~49,000, minimum: 5,000)")
     return ok
 
 
@@ -154,6 +155,59 @@ def check_outputs_exist() -> bool:
     return all_ok
 
 
+def check_room_ir() -> bool:
+    """Criterion 7: Room IR extracted for Close+Ambient pairs."""
+    print("\n--- Check 7: Room IR extraction ---")
+    import h5py
+
+    if not FEATURES_H5_PATH.exists():
+        print("FAIL: Features HDF5 not found.")
+        return False
+
+    with h5py.File(FEATURES_H5_PATH, "r") as hf:
+        groups = list(hf.keys())
+        close_pedal_off = [g for g in groups if "_micClose_" in g and "_pedalOff_" in g]
+        with_ir = sum(1 for g in close_pedal_off if "room_ir" in hf[g])
+
+        total = len(close_pedal_off)
+        pct = (with_ir / total * 100) if total > 0 else 0
+        print(f"  Close+PedalOff groups: {total}")
+        print(f"  With room_ir: {with_ir} ({pct:.1f}%)")
+
+    ok = with_ir > 0
+    print(f"  {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def check_inharmonicity() -> bool:
+    """Criterion 8: Inharmonicity B success rate > 75%."""
+    print("\n--- Check 8: Inharmonicity B extraction ---")
+
+    if not MANIFEST_PATH.exists():
+        print("FAIL: Manifest not found.")
+        return False
+
+    df = pd.read_parquet(MANIFEST_PATH)
+    if "B" not in df.columns:
+        print("FAIL: No 'B' column in manifest.")
+        return False
+
+    total = len(df)
+    nonzero = (df["B"] > 0).sum()
+    interpolated = (df["B_fit_r_squared"] == -1.0).sum() if "B_fit_r_squared" in df.columns else 0
+    measured = nonzero - interpolated
+    pct = measured / total * 100
+
+    print(f"  Total samples: {total}")
+    print(f"  B > 0 (measured): {measured} ({pct:.1f}%)")
+    print(f"  B > 0 (interpolated): {interpolated}")
+    print(f"  B = 0 (failed): {total - nonzero}")
+
+    ok = pct > 75
+    print(f"  {'PASS' if ok else 'FAIL'} (target: >75% measured)")
+    return ok
+
+
 def validate_all() -> bool:
     """Run all validation checks. Returns True if all pass."""
     print("=" * 60)
@@ -165,8 +219,10 @@ def validate_all() -> bool:
         "2. Features extracted": check_features_extracted(),
         "3. Resynthesis test": check_resynthesis(),
         "4. Train/val/test split": check_split(),
-        "5. MIDI pairs ≥5000": check_midi_pairs(),
+        "5. MIDI pairs >=5000": check_midi_pairs(),
         "6. Output files": check_outputs_exist(),
+        "7. Room IR extraction": check_room_ir(),
+        "8. Inharmonicity B >75%": check_inharmonicity(),
     }
 
     print("\n" + "=" * 60)

@@ -53,9 +53,10 @@ def render_midi_to_audio(
     """
     sfizz_cmd = check_sfizz_available()
 
+    temp_midi = None
     if velocity_scale != 1.0:
         # Create a temporary MIDI with scaled velocities
-        midi_path = _scale_midi_velocities(midi_path, velocity_scale)
+        midi_path = temp_midi = _scale_midi_velocities(midi_path, velocity_scale)
 
     # Build sfizz_render command
     # sfizz_render uses --wav (not --output) for the output file
@@ -78,6 +79,13 @@ def render_midi_to_audio(
 
     if not output_path.exists():
         raise RuntimeError(f"sfizz_render produced no output: {output_path}")
+
+    # Clean up temp MIDI file
+    if temp_midi is not None:
+        try:
+            temp_midi.unlink()
+        except OSError:
+            pass
 
     return output_path
 
@@ -107,9 +115,18 @@ def get_renderer_info() -> dict:
     """Return information about the renderer for manifest recording."""
     try:
         sfizz_path = check_sfizz_available()
-        result = subprocess.run([str(sfizz_path), "--version"], capture_output=True, text=True, timeout=10)
-        version = result.stdout.strip() if result.returncode == 0 else "unknown"
-    except (RuntimeError, subprocess.TimeoutExpired):
+        # sfizz_render may not support --version; try both forms
+        for args in [["--version"], ["-V"], ["--help"]]:
+            try:
+                result = subprocess.run([str(sfizz_path)] + args, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    version = result.stdout.strip().split("\n")[0]
+                    break
+            except subprocess.TimeoutExpired:
+                continue
+        else:
+            version = "unknown"
+    except RuntimeError:
         version = "not_available"
 
     return {
