@@ -35,15 +35,10 @@ from piano_neuronal.s2_baseline.midi_encoding import (
 logger = logging.getLogger(__name__)
 
 
-def _resample_and_cache(
-    idx: int,
-    h5_path: str,
-    cache_dir: Path,
-    source_sr: int,
-    target_sr: int,
-    n_samples: int,
-) -> bool:
+def _resample_and_cache_worker(args):
     """Worker function for parallel audio resampling and caching."""
+    idx, h5_path, cache_dir, source_sr, target_sr, n_samples = args
+    cache_dir = Path(cache_dir)
     audio_path = cache_dir / f"audio_{idx:05d}.pt"
     if audio_path.exists():
         return True
@@ -69,7 +64,6 @@ def _resample_and_cache(
         torch.save(audio_tensor, audio_path)
         return True
     except Exception as e:
-        logger.warning(f"Failed to cache audio {idx}: {e}")
         return False
 
 
@@ -212,27 +206,20 @@ class MidiPairsDataset(Dataset):
         With 64 cores this takes ~2-3 minutes for 23k segments.
         After preloading, __getitem__ reads cached audio instead of resampling.
         """
-        from concurrent.futures import ProcessPoolExecutor
-        from functools import partial
         import time
+        from multiprocessing import Pool
 
         logger.info(f"Pre-resampling {len(self.indices)} audio segments with {num_workers} workers...")
         t0 = time.time()
 
-        worker_fn = partial(
-            _resample_and_cache,
-            h5_path=self.h5_path,
-            cache_dir=self._cache_dir,
-            source_sr=self.source_sr,
-            target_sr=self.target_sr,
-            n_samples=self.n_samples,
-        )
+        args = [
+            (idx, str(self.h5_path), str(self._cache_dir), self.source_sr, self.target_sr, self.n_samples)
+            for idx in self.indices
+        ]
 
         done = 0
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            futures = {executor.submit(worker_fn, idx): idx for idx in self.indices}
-            for future in futures:
-                future.result()
+        with Pool(processes=num_workers) as pool:
+            for success in pool.imap_unordered(_resample_and_cache_worker, args):
                 done += 1
                 if done % 2000 == 0:
                     logger.info(f"  Cached {done}/{len(self.indices)} audio segments")
