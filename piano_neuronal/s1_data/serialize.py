@@ -178,7 +178,12 @@ def process_and_serialize():
     # maxtasksperchild forces worker restart every 100 tasks to prevent
     # memory accumulation from librosa/numpy FFT buffers
     h5_mode = "a" if resume_mode else "w"
-    with h5py.File(FEATURES_H5_PATH, h5_mode, rdcc_nbytes=0) as hf:
+    # Use libver='latest' for new files to enable HDF5 v2 format with 64-bit addressing.
+    # This prevents "addr overflow" errors when the file grows beyond ~17GB.
+    h5_kwargs = {"rdcc_nbytes": 0}
+    if h5_mode == "w":
+        h5_kwargs["libver"] = "latest"
+    with h5py.File(FEATURES_H5_PATH, h5_mode, **h5_kwargs) as hf:
         with Pool(N_WORKERS, maxtasksperchild=100) as pool:
             for batch_start in range(0, len(todo_files), BATCH_SIZE):
                 batch = todo_files[batch_start:batch_start + BATCH_SIZE]
