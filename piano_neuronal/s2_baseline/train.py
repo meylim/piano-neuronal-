@@ -86,16 +86,32 @@ def train(config: TrainConfig) -> None:
         model(dummy_cond, dummy_pedal, dummy_z)
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # torch.compile with fallback (Triton not available on Windows)
+    # torch.compile with fallback — Triton can crash on some GPU/driver combos
+    compiled = False
     if not config.no_compile:
         try:
             torch._dynamo.config.suppress_errors = True
+            torch._dynamo.config.cache_size_limit = 64
             model = torch.compile(model)
+            compiled = True
             logger.info("torch.compile() enabled (suppress_errors=True)")
         except Exception as e:
-            logger.warning(f"torch.compile() failed, continuing without: {e}")
+            logger.warning(f"torch.compile() init failed, continuing without: {e}")
             if hasattr(model, '_orig_mod'):
                 model = model._orig_mod
+
+    # Verify compile works at runtime — Triton can crash even if init succeeds
+    if compiled:
+        try:
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                                                   enabled=device.type == "cuda"):
+                _ = model(dummy_cond, dummy_pedal, dummy_z)
+            logger.info("torch.compile() runtime OK")
+        except Exception as e:
+            logger.warning(f"torch.compile() runtime failed ({e}), reverting to eager")
+            if hasattr(model, '_orig_mod'):
+                model = model._orig_mod
+            compiled = False
 
     # Loss
     criterion = HybridLoss()
