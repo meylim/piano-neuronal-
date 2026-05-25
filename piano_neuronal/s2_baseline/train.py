@@ -131,11 +131,8 @@ def train(config: TrainConfig) -> None:
     logger.info("Loading training dataset...")
     train_dataset = MidiPairsDataset(split=TRAIN_SPLIT)
     logger.info(f"Training samples: {len(train_dataset)}")
-    logger.info("Pre-resampling audio cache (fast on multi-core)...")
-    train_dataset.preload_audio_cache(num_workers=min(16, os.cpu_count() or 4))
     logger.info("Loading validation dataset...")
     val_dataset = MidiPairsDataset(split=VAL_SPLIT)
-    val_dataset.preload_audio_cache(num_workers=min(16, os.cpu_count() or 4))
     logger.info(f"Validation samples: {len(val_dataset)}")
 
     # Use num_workers=0 on local-debug (Windows doesn't support multiprocessing well)
