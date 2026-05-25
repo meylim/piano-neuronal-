@@ -121,6 +121,10 @@ class MidiPairsDataset(Dataset):
         """Cache path for precomputed conditioning tensors."""
         return self._cache_dir / f"{self.split}_pair_{idx:05d}.pt"
 
+    def _get_audio_cache_path(self, idx: int) -> Path:
+        """Cache path for precomputed resampled audio."""
+        return self._cache_dir / f"audio_{idx:05d}.pt"
+
     def _load_and_encode(self, hf: h5py.File, idx: int) -> Tuple[torch.Tensor, np.ndarray]:
         """Load audio and encode MIDI conditioning for a pair.
 
@@ -164,12 +168,78 @@ class MidiPairsDataset(Dataset):
 
         return audio_tensor, midi_events
 
+    def preload_audio_cache(self, num_workers: int = 8) -> None:
+        """Pre-resample all audio and cache to disk for fast access.
+
+        With 64 cores this takes ~2-3 minutes for 23k segments.
+        After preloading, __getitem__ reads cached audio instead of resampling.
+        """
+        from concurrent.futures import ProcessPoolExecutor
+        import time
+
+        logger.info(f"Pre-resampling {len(self.indices)} audio segments with {num_workers} workers...")
+        t0 = time.time()
+
+        resampler = torchaudio.transforms.Resample(
+            orig_freq=self.source_sr, new_freq=self.target_sr
+        )
+
+        def _process_one(idx):
+            audio_path = self._cache_dir / f"audio_{idx:05d}.pt"
+            if audio_path.exists():
+                return True
+            try:
+                with h5py.File(self.h5_path, "r") as hf:
+                    key = f"pair_{idx:05d}"
+                    grp = hf[key]
+                    audio = grp["audio"][:]
+                    if audio.ndim == 1:
+                        audio = audio[np.newaxis, :]
+                    audio_tensor = torch.from_numpy(audio).float()
+                    if audio_tensor.shape[0] > 1:
+                        audio_tensor = audio_tensor.mean(dim=0, keepdim=True)
+                    audio_tensor = resampler(audio_tensor)
+                    audio_tensor = audio_tensor.squeeze(0)
+                    if audio_tensor.shape[0] > self.n_samples:
+                        audio_tensor = audio_tensor[:self.n_samples]
+                    elif audio_tensor.shape[0] < self.n_samples:
+                        audio_tensor = torch.nn.functional.pad(
+                            audio_tensor, (0, self.n_samples - audio_tensor.shape[0])
+                        )
+                torch.save(audio_tensor, audio_path)
+                return True
+            except Exception as e:
+                logger.warning(f"Failed to cache audio {idx}: {e}")
+                return False
+
+        done = 0
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_process_one, idx): idx for idx in self.indices}
+            for future in futures:
+                future.result()
+                done += 1
+                if done % 2000 == 0:
+                    logger.info(f"  Cached {done}/{len(self.indices)} audio segments")
+
+        elapsed = time.time() - t0
+        logger.info(f"Audio cache complete: {done} segments in {elapsed:.1f}s ({done/elapsed:.0f} seg/s)")
+
     def __len__(self) -> int:
         return len(self.indices)
 
     def __getitem__(self, local_idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         idx = self.indices[local_idx]
         cache_path = self._get_cache_path(idx)
+        audio_cache_path = self._get_audio_cache_path(idx)
+
+        # Try loading precomputed audio from cache
+        if audio_cache_path.exists():
+            audio = torch.load(audio_cache_path, weights_only=False)
+        else:
+            with h5py.File(self.h5_path, "r") as hf:
+                audio, _ = self._load_and_encode(hf, idx)
+            # Cache for next time
+            torch.save(audio, audio_cache_path)
 
         # Try loading precomputed conditioning from cache
         if cache_path.exists():
@@ -177,14 +247,11 @@ class MidiPairsDataset(Dataset):
             conditioning = cached["conditioning"]
             pedal = cached["pedal"]
             polyphony = cached["polyphony"]
-
-            # Still need to load audio (too large to cache reasonably)
-            with h5py.File(self.h5_path, "r") as hf:
-                audio, _ = self._load_and_encode(hf, idx)
         else:
-            # Full encode from HDF5
+            # Full encode from HDF5 (only MIDI encoding needed, audio already cached)
             with h5py.File(self.h5_path, "r") as hf:
-                audio, midi_events = self._load_and_encode(hf, idx)
+                key = f"pair_{idx:05d}"
+                midi_events = hf[key]["midi_events"][:]
 
             conditioning_np, pedal_np, polyphony_np = encode_midi_events(
                 midi_events,
@@ -196,7 +263,6 @@ class MidiPairsDataset(Dataset):
 
             # Filter out high-polyphony segments
             if not check_polyphony_limit(polyphony_np, self.max_polyphony):
-                # Return a zero sample (will be filtered by collate)
                 return (
                     torch.zeros(self.n_samples, dtype=torch.float32),
                     torch.zeros(self.n_frames, self.n_synths, 2, dtype=torch.float32),
