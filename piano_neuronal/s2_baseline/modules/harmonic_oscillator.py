@@ -54,12 +54,13 @@ class HarmonicOscillator(nn.Module):
         amp_upsampled = upsample_with_window(amplitudes, n_samples)  # (B, n_samples, 1)
         hd_upsampled = upsample_with_window(harmonic_distribution, n_samples)  # (B, n_samples, n_harmonics)
 
-        # Mask frequencies below minimum
+        # Mask frequencies below minimum and clamp inf/nan
         f0_upsampled = torch.where(
             f0_upsampled < self.min_frequency,
             torch.zeros_like(f0_upsampled),
             f0_upsampled
         )
+        f0_upsampled = torch.nan_to_num(f0_upsampled, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Compute harmonic frequencies: f_n = f0 * n
         harmonic_indices = torch.arange(1, self.n_harmonics + 1, device=f0_hz.device, dtype=f0_hz.dtype)

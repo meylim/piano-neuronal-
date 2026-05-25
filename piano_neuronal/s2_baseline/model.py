@@ -130,8 +130,9 @@ class PianoModel(nn.Module):
         detuning_ratio = self.detuner(ext_pitch, global_detuning)  # (B, T, n_synths, n_substrings)
 
         # 7. Compute f0_hz for each voice and substring
-        # MIDI pitch from normalised pitch
+        # MIDI pitch from normalised pitch (clamp to valid range)
         midi_pitch = ext_pitch * 128.0  # (B, T, n_synths)
+        midi_pitch = torch.clamp(midi_pitch, min=0.0, max=127.0)
         f0_base = midi_to_hz(midi_pitch)  # (B, T, n_synths)
 
         # Apply detuning for each substring

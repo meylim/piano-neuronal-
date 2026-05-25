@@ -95,8 +95,9 @@ class MultiInharmonic(nn.Module):
         f0_up = upsample_with_window(f0_hz, n_samples)  # (B, S, n_substrings)
         inharm_up = upsample_with_window(inharm_coef, n_samples)  # (B, S, n_substrings)
 
-        # Mask low fundamentals
+        # Mask low fundamentals and clamp inf/nan from upsampled values
         f0_up = torch.where(f0_up < self.min_frequency, torch.zeros_like(f0_up), f0_up)
+        f0_up = torch.nan_to_num(f0_up, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Sum across substrings
         audio = torch.zeros(n_samples, device=f0_hz.device, dtype=f0_hz.dtype)
