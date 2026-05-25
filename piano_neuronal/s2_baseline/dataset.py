@@ -35,6 +35,44 @@ from piano_neuronal.s2_baseline.midi_encoding import (
 logger = logging.getLogger(__name__)
 
 
+def _resample_and_cache(
+    idx: int,
+    h5_path: str,
+    cache_dir: Path,
+    source_sr: int,
+    target_sr: int,
+    n_samples: int,
+) -> bool:
+    """Worker function for parallel audio resampling and caching."""
+    audio_path = cache_dir / f"audio_{idx:05d}.pt"
+    if audio_path.exists():
+        return True
+    try:
+        resampler = torchaudio.transforms.Resample(orig_freq=source_sr, new_freq=target_sr)
+        with h5py.File(h5_path, "r") as hf:
+            key = f"pair_{idx:05d}"
+            grp = hf[key]
+            audio = grp["audio"][:]
+            if audio.ndim == 1:
+                audio = audio[np.newaxis, :]
+            audio_tensor = torch.from_numpy(audio).float()
+            if audio_tensor.shape[0] > 1:
+                audio_tensor = audio_tensor.mean(dim=0, keepdim=True)
+            audio_tensor = resampler(audio_tensor)
+            audio_tensor = audio_tensor.squeeze(0)
+            if audio_tensor.shape[0] > n_samples:
+                audio_tensor = audio_tensor[:n_samples]
+            elif audio_tensor.shape[0] < n_samples:
+                audio_tensor = torch.nn.functional.pad(
+                    audio_tensor, (0, n_samples - audio_tensor.shape[0])
+                )
+        torch.save(audio_tensor, audio_path)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to cache audio {idx}: {e}")
+        return False
+
+
 class MidiPairsDataset(Dataset):
     """Dataset reading from Sprint 1 midi_pairs.h5 with on-disk caching.
 
@@ -175,46 +213,24 @@ class MidiPairsDataset(Dataset):
         After preloading, __getitem__ reads cached audio instead of resampling.
         """
         from concurrent.futures import ProcessPoolExecutor
+        from functools import partial
         import time
 
         logger.info(f"Pre-resampling {len(self.indices)} audio segments with {num_workers} workers...")
         t0 = time.time()
 
-        resampler = torchaudio.transforms.Resample(
-            orig_freq=self.source_sr, new_freq=self.target_sr
+        worker_fn = partial(
+            _resample_and_cache,
+            h5_path=self.h5_path,
+            cache_dir=self._cache_dir,
+            source_sr=self.source_sr,
+            target_sr=self.target_sr,
+            n_samples=self.n_samples,
         )
-
-        def _process_one(idx):
-            audio_path = self._cache_dir / f"audio_{idx:05d}.pt"
-            if audio_path.exists():
-                return True
-            try:
-                with h5py.File(self.h5_path, "r") as hf:
-                    key = f"pair_{idx:05d}"
-                    grp = hf[key]
-                    audio = grp["audio"][:]
-                    if audio.ndim == 1:
-                        audio = audio[np.newaxis, :]
-                    audio_tensor = torch.from_numpy(audio).float()
-                    if audio_tensor.shape[0] > 1:
-                        audio_tensor = audio_tensor.mean(dim=0, keepdim=True)
-                    audio_tensor = resampler(audio_tensor)
-                    audio_tensor = audio_tensor.squeeze(0)
-                    if audio_tensor.shape[0] > self.n_samples:
-                        audio_tensor = audio_tensor[:self.n_samples]
-                    elif audio_tensor.shape[0] < self.n_samples:
-                        audio_tensor = torch.nn.functional.pad(
-                            audio_tensor, (0, self.n_samples - audio_tensor.shape[0])
-                        )
-                torch.save(audio_tensor, audio_path)
-                return True
-            except Exception as e:
-                logger.warning(f"Failed to cache audio {idx}: {e}")
-                return False
 
         done = 0
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            futures = {executor.submit(_process_one, idx): idx for idx in self.indices}
+            futures = {executor.submit(worker_fn, idx): idx for idx in self.indices}
             for future in futures:
                 future.result()
                 done += 1
@@ -222,7 +238,7 @@ class MidiPairsDataset(Dataset):
                     logger.info(f"  Cached {done}/{len(self.indices)} audio segments")
 
         elapsed = time.time() - t0
-        logger.info(f"Audio cache complete: {done} segments in {elapsed:.1f}s ({done/elapsed:.0f} seg/s)")
+        logger.info(f"Audio cache complete: {done} segments in {elapsed:.1f}s ({done/max(elapsed,0.1):.0f} seg/s)")
 
     def __len__(self) -> int:
         return len(self.indices)
